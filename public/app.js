@@ -857,30 +857,50 @@ document.getElementById('adminVulnInput').addEventListener('change', e=>{
   document.getElementById('adminVulnSubmit').disabled = !files.length;
 });
 
-// Vuln upload
+// Vuln upload — parse XLSX in browser, send JSON to server
 document.getElementById('adminVulnSubmit').addEventListener('click', async ()=>{
   const files = document.getElementById('adminVulnInput').files;
   const msgEl = document.getElementById('adminVulnMsg');
   const btn   = document.getElementById('adminVulnSubmit');
   if (!files.length) return;
-  btn.disabled = true; btn.textContent = 'Uploading…';
+  btn.disabled = true; btn.textContent = 'Processing…';
   msgEl.className = 'admin-msg'; msgEl.textContent = '';
-  const fd = new FormData();
-  Array.from(files).forEach(f => fd.append('files', f));
+  let uploaded = 0, allDays = [];
   try {
-    const res  = await fetch('/api/upload/vuln', { method:'POST', headers:{'x-admin-token': adminToken}, body: fd });
-    const json = await res.json();
-    if (json.success) {
+    for (const file of Array.from(files)) {
+      // Parse XLSX in browser
+      const rows = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => {
+          try {
+            const wb   = XLSX.read(e.target.result, { type: 'array' });
+            const ws   = wb.Sheets[wb.SheetNames[0]];
+            resolve(XLSX.utils.sheet_to_json(ws, { defval: '' }));
+          } catch(err) { reject(err); }
+        };
+        reader.readAsArrayBuffer(file);
+      });
+      const dateKey = dateFromFilename(file.name);
+      // Send JSON to server
+      const res  = await fetch('/api/upload/vuln', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
+        body: JSON.stringify({ dateKey, rows, filename: file.name })
+      });
+      const json = await res.json();
+      if (json.success) { uploaded++; allDays = json.days; }
+      else { msgEl.className='admin-msg err'; msgEl.textContent='❌ '+(json.error||'Upload failed'); }
+    }
+    if (uploaded > 0) {
       msgEl.className = 'admin-msg ok';
-      msgEl.textContent = `✅ Uploaded ${json.loaded.length} file(s). Days: ${json.days.join(', ')}`;
+      msgEl.textContent = `✅ Uploaded ${uploaded} file(s). Days: ${allDays.join(', ')}`;
       document.getElementById('adminVulnInput').value = '';
       document.getElementById('adminVulnLabel').textContent = 'Click to select file(s)';
+      document.getElementById('adminVulnSubmit').disabled = true;
       await fetchDataFromServer();
       loadAdminMeta();
-    } else {
-      msgEl.className = 'admin-msg err'; msgEl.textContent = '❌ ' + (json.error||'Upload failed');
     }
-  } catch(e) { msgEl.className='admin-msg err'; msgEl.textContent='❌ Server error'; }
+  } catch(e) { msgEl.className='admin-msg err'; msgEl.textContent='❌ Error: '+e.message; }
   finally { btn.disabled=false; btn.textContent='Upload'; }
 });
 
@@ -891,30 +911,47 @@ document.getElementById('adminResInput').addEventListener('change', e=>{
   document.getElementById('adminResSubmit').disabled = !files.length;
 });
 
-// Resolution upload
+// Resolution upload — parse XLSX in browser, send JSON to server
 document.getElementById('adminResSubmit').addEventListener('click', async ()=>{
   const files = document.getElementById('adminResInput').files;
   const msgEl = document.getElementById('adminResMsg');
   const btn   = document.getElementById('adminResSubmit');
   if (!files.length) return;
-  btn.disabled = true; btn.textContent = 'Uploading…';
+  btn.disabled = true; btn.textContent = 'Processing…';
   msgEl.className = 'admin-msg'; msgEl.textContent = '';
-  const fd = new FormData();
-  Array.from(files).forEach(f => fd.append('files', f));
+  let uploaded = 0, totalRecs = 0;
   try {
-    const res  = await fetch('/api/upload/resolution', { method:'POST', headers:{'x-admin-token': adminToken}, body: fd });
-    const json = await res.json();
-    if (json.success) {
+    for (const file of Array.from(files)) {
+      const rows = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => {
+          try {
+            const wb   = XLSX.read(e.target.result, { type: 'array' });
+            const ws   = wb.Sheets[wb.SheetNames[0]];
+            resolve(XLSX.utils.sheet_to_json(ws, { defval: '' }).map(normaliseResRow));
+          } catch(err) { reject(err); }
+        };
+        reader.readAsArrayBuffer(file);
+      });
+      const res  = await fetch('/api/upload/resolution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
+        body: JSON.stringify({ rows, filename: file.name })
+      });
+      const json = await res.json();
+      if (json.success) { uploaded++; totalRecs = json.total; }
+      else { msgEl.className='admin-msg err'; msgEl.textContent='❌ '+(json.error||'Upload failed'); }
+    }
+    if (uploaded > 0) {
       msgEl.className = 'admin-msg ok';
-      msgEl.textContent = `✅ Uploaded ${json.loaded.length} file(s). Total records: ${json.total}`;
+      msgEl.textContent = `✅ Uploaded ${uploaded} file(s). Total records: ${totalRecs}`;
       document.getElementById('adminResInput').value = '';
       document.getElementById('adminResLabel').textContent = 'Click to select file(s)';
+      document.getElementById('adminResSubmit').disabled = true;
       await fetchDataFromServer();
       loadAdminMeta();
-    } else {
-      msgEl.className = 'admin-msg err'; msgEl.textContent = '❌ ' + (json.error||'Upload failed');
     }
-  } catch(e) { msgEl.className='admin-msg err'; msgEl.textContent='❌ Server error'; }
+  } catch(e) { msgEl.className='admin-msg err'; msgEl.textContent='❌ Error: '+e.message; }
   finally { btn.disabled=false; btn.textContent='Upload'; }
 });
 
