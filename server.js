@@ -74,6 +74,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});  
+
 // Multer: store files in memory for parsing
 const upload = multer({
   storage: multer.memoryStorage(),
