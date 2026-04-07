@@ -74,9 +74,16 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Explicit root route
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});  
+});
+
+// Catch-all: serve index.html for any unknown route
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Multer: store files in memory for parsing
 const upload = multer({
