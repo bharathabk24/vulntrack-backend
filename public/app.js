@@ -850,6 +850,39 @@ async function loadAdminMeta() {
   } catch(e) { document.getElementById('adminMeta').textContent = 'Could not load server info.'; }
 }
 
+// Helper: send rows in chunks to avoid JSON size limits
+const CHUNK_SIZE = 500; // rows per request
+
+async function sendInChunks(endpoint, rows, extraFields, token) {
+  let lastJson = null;
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + CHUNK_SIZE);
+    const res   = await fetch(endpoint, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
+      body:    JSON.stringify({ ...extraFields, rows: chunk })
+    });
+    lastJson = await res.json();
+    if (!lastJson.success) return lastJson;
+  }
+  return lastJson || { success: false, error: 'No data' };
+}
+
+// Parse XLSX file in browser → return rows array
+function parseXLSXInBrowser(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        resolve(XLSX.utils.sheet_to_json(ws, { defval: '' }));
+      } catch(err) { reject(err); }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 // Vuln file picker
 document.getElementById('adminVulnInput').addEventListener('change', e=>{
   const files = e.target.files;
@@ -857,70 +890,28 @@ document.getElementById('adminVulnInput').addEventListener('change', e=>{
   document.getElementById('adminVulnSubmit').disabled = !files.length;
 });
 
-// Vuln upload — parse XLSX in browser, send in chunks to avoid Render body-size limits
-// Each file is split into CHUNK_SIZE-row batches. The server appends each chunk.
-const UPLOAD_CHUNK_SIZE = 2000; // ~2-4 MB per request, well under any CDN/host limit
-
-async function sendChunked(endpoint, rows, extraFields, msgEl, fileLabel) {
-  const totalChunks = Math.ceil(rows.length / UPLOAD_CHUNK_SIZE);
-  let lastJson = null;
-  for (let i = 0; i < totalChunks; i++) {
-    const chunk = rows.slice(i * UPLOAD_CHUNK_SIZE, (i + 1) * UPLOAD_CHUNK_SIZE);
-    msgEl.textContent = `Uploading ${fileLabel}… chunk ${i+1}/${totalChunks} (${chunk.length} rows)`;
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
-      body: JSON.stringify({ ...extraFields, rows: chunk, chunkIndex: i, totalChunks })
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      let msg = 'Server error ' + res.status;
-      try { msg = JSON.parse(text).error || msg; } catch(e) {}
-      throw new Error(msg);
-    }
-    lastJson = await res.json();
-    if (!lastJson.success) throw new Error(lastJson.error || 'Upload failed on chunk ' + i);
-  }
-  return lastJson;
-}
-
+// Vuln upload — parse XLSX in browser, send in chunks to server
 document.getElementById('adminVulnSubmit').addEventListener('click', async ()=>{
   const files = document.getElementById('adminVulnInput').files;
   const msgEl = document.getElementById('adminVulnMsg');
   const btn   = document.getElementById('adminVulnSubmit');
   if (!files.length) return;
-  btn.disabled = true; btn.textContent = 'Processing…';
+  btn.disabled = true;
   msgEl.className = 'admin-msg'; msgEl.textContent = '';
   let uploaded = 0, allDays = [];
   try {
     for (const file of Array.from(files)) {
-      // Parse XLSX fully in browser first
-      const rows = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = e => {
-          try {
-            const wb   = XLSX.read(e.target.result, { type: 'array' });
-            const ws   = wb.Sheets[wb.SheetNames[0]];
-            resolve(XLSX.utils.sheet_to_json(ws, { defval: '' }));
-          } catch(err) { reject(err); }
-        };
-        reader.readAsArrayBuffer(file);
-      });
-      msgEl.className = 'admin-msg';
-      msgEl.textContent = `Parsed ${rows.length} rows from ${file.name}. Uploading…`;
+      btn.textContent = `Processing ${file.name}…`;
+      const rows    = await parseXLSXInBrowser(file);
       const dateKey = dateFromFilename(file.name);
-      // Send in chunks — fixes "Unexpected end of JSON input" on Render / large files
-      const json = await sendChunked(
-        '/api/upload/vuln', rows,
-        { dateKey, filename: file.name },
-        msgEl, file.name
-      );
-      uploaded++;
-      if (json.days && json.days.length) allDays = json.days;
+      msgEl.textContent = `Uploading ${file.name} (${rows.length} rows)…`;
+      const json = await sendInChunks('/api/upload/vuln', rows, { dateKey, filename: file.name }, adminToken);
+      if (json && json.success) { uploaded++; allDays = json.days; }
+      else { msgEl.className='admin-msg err'; msgEl.textContent='❌ '+(json&&json.error||'Upload failed'); return; }
     }
     if (uploaded > 0) {
       msgEl.className = 'admin-msg ok';
-      msgEl.textContent = `✅ Uploaded ${uploaded} file(s). Days on server: ${allDays.join(', ')}`;
+      msgEl.textContent = `✅ Uploaded ${uploaded} file(s). Days: ${allDays.join(', ')}`;
       document.getElementById('adminVulnInput').value = '';
       document.getElementById('adminVulnLabel').textContent = 'Click to select file(s)';
       document.getElementById('adminVulnSubmit').disabled = true;
@@ -938,41 +929,27 @@ document.getElementById('adminResInput').addEventListener('change', e=>{
   document.getElementById('adminResSubmit').disabled = !files.length;
 });
 
-// Resolution upload — chunked to avoid body-size limits
+// Resolution upload — parse XLSX in browser, send in chunks to server
 document.getElementById('adminResSubmit').addEventListener('click', async ()=>{
   const files = document.getElementById('adminResInput').files;
   const msgEl = document.getElementById('adminResMsg');
   const btn   = document.getElementById('adminResSubmit');
   if (!files.length) return;
-  btn.disabled = true; btn.textContent = 'Processing…';
+  btn.disabled = true;
   msgEl.className = 'admin-msg'; msgEl.textContent = '';
   let uploaded = 0, totalRecs = 0;
   try {
     for (const file of Array.from(files)) {
-      const rows = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = e => {
-          try {
-            const wb   = XLSX.read(e.target.result, { type: 'array' });
-            const ws   = wb.Sheets[wb.SheetNames[0]];
-            resolve(XLSX.utils.sheet_to_json(ws, { defval: '' }).map(normaliseResRow));
-          } catch(err) { reject(err); }
-        };
-        reader.readAsArrayBuffer(file);
-      });
-      msgEl.className = 'admin-msg';
-      msgEl.textContent = `Parsed ${rows.length} rows from ${file.name}. Uploading…`;
-      const json = await sendChunked(
-        '/api/upload/resolution', rows,
-        { filename: file.name },
-        msgEl, file.name
-      );
-      uploaded++;
-      totalRecs = json.total;
+      btn.textContent = `Processing ${file.name}…`;
+      const rows = (await parseXLSXInBrowser(file)).map(normaliseResRow);
+      msgEl.textContent = `Uploading ${file.name} (${rows.length} rows)…`;
+      const json = await sendInChunks('/api/upload/resolution', rows, { filename: file.name }, adminToken);
+      if (json && json.success) { uploaded++; totalRecs = json.total; }
+      else { msgEl.className='admin-msg err'; msgEl.textContent='❌ '+(json&&json.error||'Upload failed'); return; }
     }
     if (uploaded > 0) {
       msgEl.className = 'admin-msg ok';
-      msgEl.textContent = `✅ Uploaded ${uploaded} file(s). Total resolution records: ${totalRecs}`;
+      msgEl.textContent = `✅ Uploaded ${uploaded} file(s). Total records: ${totalRecs}`;
       document.getElementById('adminResInput').value = '';
       document.getElementById('adminResLabel').textContent = 'Click to select file(s)';
       document.getElementById('adminResSubmit').disabled = true;
